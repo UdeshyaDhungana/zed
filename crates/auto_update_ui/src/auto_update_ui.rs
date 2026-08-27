@@ -158,14 +158,15 @@ fn view_release_notes_locally(
                 .update_in(cx, |workspace, window, cx| {
                     let editor =
                         cx.new(|cx| Editor::for_multibuffer(buffer, Some(project), window, cx));
-                    let markdown_preview: Entity<MarkdownPreviewView> = MarkdownPreviewView::new(
-                        MarkdownPreviewMode::Default,
-                        editor,
-                        ws_handle,
-                        language_registry,
-                        window,
-                        cx,
-                    );
+                    let markdown_preview: Entity<MarkdownPreviewView> =
+                        MarkdownPreviewView::new_entity(
+                            MarkdownPreviewMode::Default,
+                            editor,
+                            ws_handle,
+                            language_registry,
+                            window,
+                            cx,
+                        );
                     workspace.add_item_to_active_pane(
                         Box::new(markdown_preview),
                         None,

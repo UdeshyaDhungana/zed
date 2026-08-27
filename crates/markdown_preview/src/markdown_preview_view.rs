@@ -254,7 +254,7 @@ impl MarkdownPreviewView {
     ) -> Entity<MarkdownPreviewView> {
         let language_registry = workspace.project().read(cx).languages().clone();
         let workspace_handle = workspace.weak_handle();
-        MarkdownPreviewView::new(
+        MarkdownPreviewView::new_entity(
             MarkdownPreviewMode::Default,
             editor,
             workspace_handle,
@@ -272,7 +272,7 @@ impl MarkdownPreviewView {
     ) -> Entity<MarkdownPreviewView> {
         let language_registry = workspace.project().read(cx).languages().clone();
         let workspace_handle = workspace.weak_handle();
-        MarkdownPreviewView::new(
+        MarkdownPreviewView::new_entity(
             MarkdownPreviewMode::Follow,
             editor,
             workspace_handle,
@@ -288,83 +288,169 @@ impl MarkdownPreviewView {
         workspace: WeakEntity<Workspace>,
         language_registry: Arc<LanguageRegistry>,
         window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let markdown = cx.new(|cx| {
+            Markdown::new_with_options(
+                SharedString::default(),
+                Some(language_registry),
+                None,
+                MarkdownOptions {
+                    parse_html: true,
+                    render_mermaid_diagrams: true,
+                    parse_heading_slugs: true,
+                    render_metadata_blocks: true,
+                    ..Default::default()
+                },
+                cx,
+            )
+        });
+        let mut this = Self {
+            active_editor: None,
+            focus_handle: cx.focus_handle(),
+            workspace: workspace.clone(),
+            _markdown_subscription: cx.observe(
+                &markdown,
+                |this: &mut Self, markdown: Entity<Markdown>, cx| {
+                    this.sync_active_root_block(cx);
+                    let is_parsing = markdown.read(cx).is_parsing();
+                    if this.markdown_parse_pending && !is_parsing {
+                        cx.emit(SearchEvent::MatchesInvalidated);
+                    }
+                    this.markdown_parse_pending = is_parsing;
+                },
+            ),
+            markdown,
+            active_source_index: None,
+            scroll_handle: ScrollHandle::new(),
+            image_cache: RetainAllImageCache::new(cx),
+            base_directory: None,
+            pending_update_task: None,
+            hovered_url: None,
+            mode,
+            markdown_parse_pending: false,
+        };
+
+        this.set_editor(active_editor, window, cx);
+
+        match mode {
+            MarkdownPreviewMode::Follow => {
+                if let Some(workspace) = &workspace.upgrade() {
+                    cx.observe_in(workspace, window, |this, workspace, window, cx| {
+                        let item = workspace.read(cx).active_item(cx);
+                        this.workspace_updated(item, window, cx);
+                    })
+                    .detach();
+                } else {
+                    log::error!("Failed to listen to workspace updates");
+                }
+            }
+            MarkdownPreviewMode::Default => {
+                // After workspace restoration the bound editor may be an orphan that
+                // wraps the right buffer but isn't the canonical Editor instance in
+                // any pane. Re-binding to the workspace's editor for our buffer is
+                // what restores cursor-driven scroll sync — `SelectionsChanged` only
+                // fires from the editor the user actually interacts with.
+                //
+                // Subscribing to `workspace::Event` (rather than `observe`) keeps the
+                // rebind check off the cursor-move hot path; `observe` would fire on
+                // every workspace `cx.notify`.
+                if let Some(workspace) = &workspace.upgrade() {
+                    cx.subscribe_in(workspace, window, Self::on_workspace_event)
+                        .detach();
+                }
+            }
+        }
+
+        this
+    }
+
+    pub fn new_entity(
+        mode: MarkdownPreviewMode,
+        active_editor: Entity<Editor>,
+        workspace: WeakEntity<Workspace>,
+        language_registry: Arc<LanguageRegistry>,
+        window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
         cx.new(|cx| {
-            let markdown = cx.new(|cx| {
-                Markdown::new_with_options(
-                    SharedString::default(),
-                    Some(language_registry),
-                    None,
-                    MarkdownOptions {
-                        parse_html: true,
-                        render_mermaid_diagrams: true,
-                        parse_heading_slugs: true,
-                        render_metadata_blocks: true,
-                        ..Default::default()
-                    },
-                    cx,
-                )
-            });
-            let mut this = Self {
-                active_editor: None,
-                focus_handle: cx.focus_handle(),
-                workspace: workspace.clone(),
-                _markdown_subscription: cx.observe(
-                    &markdown,
-                    |this: &mut Self, markdown: Entity<Markdown>, cx| {
-                        this.sync_active_root_block(cx);
-                        let is_parsing = markdown.read(cx).is_parsing();
-                        if this.markdown_parse_pending && !is_parsing {
-                            cx.emit(SearchEvent::MatchesInvalidated);
-                        }
-                        this.markdown_parse_pending = is_parsing;
-                    },
-                ),
-                markdown,
-                active_source_index: None,
-                scroll_handle: ScrollHandle::new(),
-                image_cache: RetainAllImageCache::new(cx),
-                base_directory: None,
-                pending_update_task: None,
-                hovered_url: None,
+            Self::new(
                 mode,
-                markdown_parse_pending: false,
-            };
+                active_editor,
+                workspace,
+                language_registry,
+                window,
+                cx,
+            )
+        })
+    }
 
-            this.set_editor(active_editor, window, cx);
+    pub fn clone(&self, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let markdown = self.markdown.clone();
+        let mut cloned = Self {
+            active_editor: None,
+            focus_handle: cx.focus_handle(),
+            workspace: self.workspace.clone(),
+            _markdown_subscription: cx.observe(
+                &markdown,
+                |this: &mut Self, markdown: Entity<Markdown>, cx| {
+                    this.sync_active_root_block(cx);
+                    let is_parsing = markdown.read(cx).is_parsing();
+                    if this.markdown_parse_pending && !is_parsing {
+                        cx.emit(SearchEvent::MatchesInvalidated);
+                    }
+                    this.markdown_parse_pending = is_parsing;
+                },
+            ),
+            markdown,
+            active_source_index: None,
+            scroll_handle: ScrollHandle::new(),
+            image_cache: RetainAllImageCache::new(cx),
+            base_directory: None,
+            pending_update_task: None,
+            hovered_url: None,
+            mode: self.mode,
+            markdown_parse_pending: false,
+        };
 
-            match mode {
-                MarkdownPreviewMode::Follow => {
-                    if let Some(workspace) = &workspace.upgrade() {
-                        cx.observe_in(workspace, window, |this, workspace, window, cx| {
-                            let item = workspace.read(cx).active_item(cx);
-                            this.workspace_updated(item, window, cx);
-                        })
-                        .detach();
-                    } else {
-                        log::error!("Failed to listen to workspace updates");
-                    }
-                }
-                MarkdownPreviewMode::Default => {
-                    // After workspace restoration the bound editor may be an orphan that
-                    // wraps the right buffer but isn't the canonical Editor instance in
-                    // any pane. Re-binding to the workspace's editor for our buffer is
-                    // what restores cursor-driven scroll sync — `SelectionsChanged` only
-                    // fires from the editor the user actually interacts with.
-                    //
-                    // Subscribing to `workspace::Event` (rather than `observe`) keeps the
-                    // rebind check off the cursor-move hot path; `observe` would fire on
-                    // every workspace `cx.notify`.
-                    if let Some(workspace) = &workspace.upgrade() {
-                        cx.subscribe_in(workspace, window, Self::on_workspace_event)
-                            .detach();
-                    }
+        if let Some(active_editor) = self
+            .active_editor
+            .as_ref()
+            .map(|state| state.editor.clone())
+        {
+            cloned.set_editor(active_editor, window, cx);
+        }
+
+        match self.mode {
+            MarkdownPreviewMode::Follow => {
+                if let Some(workspace) = &self.workspace.upgrade() {
+                    cx.observe_in(workspace, window, |this, workspace, window, cx| {
+                        let item = workspace.read(cx).active_item(cx);
+                        this.workspace_updated(item, window, cx);
+                    })
+                    .detach();
+                } else {
+                    log::error!("Failed to listen to workspace updates");
                 }
             }
+            MarkdownPreviewMode::Default => {
+                // After workspace restoration the bound editor may be an orphan that
+                // wraps the right buffer but isn't the canonical Editor instance in
+                // any pane. Re-binding to the workspace's editor for our buffer is
+                // what restores cursor-driven scroll sync — `SelectionsChanged` only
+                // fires from the editor the user actually interacts with.
+                //
+                // Subscribing to `workspace::Event` (rather than `observe`) keeps the
+                // rebind check off the cursor-move hot path; `observe` would fire on
+                // every workspace `cx.notify`.
+                if let Some(workspace) = &self.workspace.upgrade() {
+                    cx.subscribe_in(workspace, window, Self::on_workspace_event)
+                        .detach();
+                }
+            }
+        }
 
-            this
-        })
+        cloned
     }
 
     fn workspace_updated(
@@ -1523,6 +1609,22 @@ impl Item for MarkdownPreviewView {
         Some(Icon::new(IconName::FileDoc))
     }
 
+    fn can_split(&self) -> bool {
+        true
+    }
+
+    fn clone_on_split(
+        &self,
+        _: Option<WorkspaceId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Option<Entity<Self>>>
+    where
+        Self: Sized,
+    {
+        Task::ready(Some(cx.new(|cx| self.clone(window, cx))))
+    }
+
     fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
         self.active_editor
             .as_ref()
@@ -1980,7 +2082,14 @@ impl SerializableItem for MarkdownPreviewView {
                 let language_registry = project.read(cx).languages().clone();
                 let editor =
                     cx.new(|cx| Editor::for_buffer(buffer, Some(project.clone()), window, cx));
-                MarkdownPreviewView::new(mode, editor, workspace, language_registry, window, cx)
+                MarkdownPreviewView::new_entity(
+                    mode,
+                    editor,
+                    workspace,
+                    language_registry,
+                    window,
+                    cx,
+                )
             })
         })
     }
