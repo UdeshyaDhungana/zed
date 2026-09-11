@@ -16819,6 +16819,48 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_clicking_panel_button_closes_a_zoomed_dock(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| {
+                TestPanel::new_with_icon(DockPosition::Bottom, 100, ui::IconName::Terminal, cx)
+            });
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Bottom, window, cx);
+            panel
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        panel.update(cx, |_, cx| cx.emit(PanelEvent::ZoomIn));
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.bottom_dock().read(cx).is_open());
+            assert_eq!(workspace.zoomed_position, Some(DockPosition::Bottom));
+        });
+
+        let button_bounds = cx
+            .debug_bounds("ICON-Terminal")
+            .expect("the panel's status bar button should be rendered");
+        cx.simulate_click(button_bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.bottom_dock().read(cx).is_open());
+            assert!(workspace.zoomed.is_none());
+            assert_eq!(workspace.zoomed_position, None);
+        });
+    }
+
+    #[gpui::test]
     async fn test_focus_restores_to_panel_when_focused_child_is_removed(
         cx: &mut gpui::TestAppContext,
     ) {
