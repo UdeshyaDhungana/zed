@@ -1401,6 +1401,10 @@ impl Render for PanelButtons {
 
         let dock_entity = self.dock.clone();
         let workspace = dock.workspace.clone();
+        let dock_is_zoomed = workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).zoomed_position)
+            == Some(dock_position);
         let mut buttons: Vec<_> = dock
             .panel_entries
             .iter()
@@ -1435,7 +1439,16 @@ impl Render for PanelButtons {
                     (action, icon_tooltip.into())
                 };
 
-                let focus_handle = dock.focus_handle(cx);
+                // A zoomed dock is not rendered at all: the workspace draws its panel
+                // in the zoomed overlay instead. The dock's focus handle then has no
+                // node in the dispatch tree, so an action dispatched from it falls
+                // back to the tree's root and reaches no handler. Aim at the panel,
+                // which is what's actually on screen.
+                let focus_handle = if dock_is_zoomed {
+                    entry.panel.panel_focus_handle(cx)
+                } else {
+                    dock.focus_handle(cx)
+                };
                 let icon_label = entry.panel.icon_label(window, cx);
 
                 Some(
@@ -1615,6 +1628,8 @@ pub mod test {
         pub default_size: Pixels,
         pub flexible: bool,
         pub activation_priority: u32,
+        /// Set to render a status bar button for this panel, so tests can click it.
+        pub icon: Option<ui::IconName>,
     }
     actions!(test_only, [ToggleTestPanel]);
 
@@ -1631,6 +1646,19 @@ pub mod test {
                 default_size: px(300.),
                 flexible: false,
                 activation_priority,
+                icon: None,
+            }
+        }
+
+        pub fn new_with_icon(
+            position: DockPosition,
+            activation_priority: u32,
+            icon: ui::IconName,
+            cx: &mut App,
+        ) -> Self {
+            Self {
+                icon: Some(icon),
+                ..Self::new(position, activation_priority, cx)
             }
         }
 
@@ -1725,11 +1753,11 @@ pub mod test {
         }
 
         fn icon(&self, _window: &Window, _: &App) -> Option<ui::IconName> {
-            None
+            self.icon
         }
 
         fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-            None
+            self.icon.map(|_| "Test Panel")
         }
 
         fn toggle_action(&self) -> Box<dyn Action> {
